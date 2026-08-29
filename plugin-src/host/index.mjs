@@ -118,9 +118,11 @@ export async function apply(ctx, config = {}) {
     return state;
   };
 
+  const workspacePath = resolve(config.workspace ?? process.cwd());
+
   const harness = new HarnessClient({
     baseUrl: harnessOrigin(ctx.webServer, config.harnessBaseUrl),
-    workspace: resolve(config.workspace ?? process.cwd()),
+    workspace: workspacePath,
     agentPreset: config.agentPreset ?? 'standard',
     autostart: false,
     dshBin: config.dshBin ?? 'dsh',
@@ -143,6 +145,9 @@ export async function apply(ctx, config = {}) {
       },
       replyTimeoutMs: config.replyTimeoutMs ?? 600_000,
       connectTimeoutMs: config.connectTimeoutMs ?? 30_000,
+      getSecurity: () => configStore.getSecurity(),
+      workspace: workspacePath,
+      shellTimeoutMs: config.shellTimeoutMs ?? 120_000,
     }),
     deleteState: async ({ botId }) => {
       const state = stateStores.get(botId);

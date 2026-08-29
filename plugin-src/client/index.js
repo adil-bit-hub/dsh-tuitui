@@ -57,6 +57,12 @@ function BotCard({ bot, busy, onEnable, onDisable, onDelete }) {
         h('div', { className: 'k' }, '已接收 / 已回复'),
         h('div', { className: 'v' }, `${stats.messagesReceived ?? 0} / ${stats.messagesReplied ?? 0}`)),
       h('div', { className: 'dtui-metaItem' },
+        h('div', { className: 'k' }, '最近发言人'),
+        h('div', { className: 'v' }, stats.lastSenderName
+          ? `${stats.lastSenderName}${stats.lastSenderAccount && stats.lastSenderAccount !== stats.lastSenderName
+            ? `（${stats.lastSenderAccount}）` : ''}`
+          : '—')),
+      h('div', { className: 'dtui-metaItem' },
         h('div', { className: 'k' }, '最近消息'),
         h('div', { className: 'v' }, formatTime(stats.lastMessageAt))),
       h('div', { className: 'dtui-metaItem' },
@@ -95,6 +101,85 @@ function BotCard({ bot, busy, onEnable, onDisable, onDelete }) {
           onDelete(bot.botId);
         },
       }, deleting ? '删除中…' : confirming ? '确认删除？' : '删除')));
+}
+
+function SecurityPanel({ security, busy, onSave }) {
+  const savedAccounts = security?.adminAccounts ?? [];
+  const savedNonAdmin = {
+    chat: security?.nonAdmin?.chat ?? true,
+  };
+  const [accounts, setAccounts] = React.useState(savedAccounts);
+  const [draft, setDraft] = React.useState('');
+  const [nonAdmin, setNonAdmin] = React.useState(savedNonAdmin);
+  const saving = busy === 'security';
+
+  const addAccount = () => {
+    const account = draft.trim();
+    if (!account || /\s/.test(account)) return;
+    if (!accounts.includes(account)) setAccounts([...accounts, account]);
+    setDraft('');
+  };
+
+  const dirty = JSON.stringify({ adminAccounts: accounts, nonAdmin })
+    !== JSON.stringify({ adminAccounts: savedAccounts, nonAdmin: savedNonAdmin });
+
+  return h('div', { className: 'dtui-card' },
+    h('div', { className: 'dtui-botHead' },
+      h('div', { className: 'dtui-botName' },
+        h('strong', null, '安全与管理员'),
+        h('span', { className: 'dtui-sub' }, '在推推里发送 /whoami 可查看自己的账号'))),
+    h('p', { className: 'dtui-health' },
+      '/shell、/exec、/run 等 shell 级指令仅限管理员使用；其余能力可按下方开关控制是否向非管理员开放。'),
+    h('div', { className: 'dtui-formRow' },
+      h('label', null, '管理员账号列表'),
+      accounts.length > 0
+        ? h('div', { className: 'dtui-chips' }, accounts.map((account) => h('span', {
+          key: account,
+          className: 'dtui-chip',
+        }, account, h('button', {
+          type: 'button',
+          className: 'dtui-chipX',
+          'aria-label': `移除 ${account}`,
+          onClick: () => setAccounts(accounts.filter((item) => item !== account)),
+        }, '×'))))
+        : h('p', { className: 'dtui-empty' }, '尚未设置管理员，所有 shell 级指令都会被拒绝。'),
+      h('div', { className: 'dtui-chipInput' },
+        h('input', {
+          className: 'dtui-input',
+          value: draft,
+          placeholder: '输入推推账号（支持账号或 UID）',
+          autoComplete: 'off',
+          onChange: (event) => setDraft(event.target.value),
+          onKeyDown: (event) => {
+            if (event.key === 'Enter') {
+              event.preventDefault();
+              addAccount();
+            }
+          },
+        }),
+        h('button', {
+          type: 'button',
+          className: 'dtui-btn dtui-btnOutline',
+          disabled: !draft.trim() || /\s/.test(draft.trim()),
+          onClick: addAccount,
+        }, '添加'))),
+    h('div', { className: 'dtui-formRow' },
+      h('label', null, '非管理员权限'),
+      h('label', { className: 'dtui-check' },
+        h('input', {
+          type: 'checkbox',
+          checked: nonAdmin.chat,
+          onChange: (event) => setNonAdmin({ ...nonAdmin, chat: event.target.checked }),
+        }),
+        '允许普通对话（转交 Harness agent）'),
+      h('span', { className: 'dtui-hint' }, 'shell 级指令不支持向非管理员授权；取消勾选后非管理员将无法与机器人对话。')),
+    h('div', { className: 'dtui-actions' },
+      h('button', {
+        type: 'button',
+        className: 'dtui-btn dtui-btnPrimary',
+        disabled: busy !== null || !dirty,
+        onClick: () => onSave({ adminAccounts: accounts, nonAdmin }),
+      }, saving ? '保存中…' : '保存安全设置')));
 }
 
 function BindForm({ busy, onBind }) {
@@ -191,10 +276,14 @@ export function TuituiSettingsTab({ rpcCall }) {
     const ok = await run(`delete:${botId}`, 'bot.delete', { botId, confirm: true });
     if (ok) setNotice({ kind: 'info', text: '推推机器人已删除，凭据与会话状态已清理。' });
   };
+  const handleSaveSecurity = async (securityPayload) => {
+    const ok = await run('security', 'security.set', securityPayload);
+    if (ok) setNotice({ kind: 'info', text: '安全设置已更新，对后续推推消息立即生效。' });
+  };
 
   return h('section', { className: 'dtui-page', 'aria-label': '推推机器人设置' },
     h('header', { className: 'dtui-title' },
-      h('p', null, '把 360 推推机器人接入 DeepSeek Harness：私聊直接回复，群聊在 @机器人 后回复；回答由 Harness agent 生成，模型与工具跟随 Harness 配置。发送 /new 可开启新会话。')),
+      h('p', null, '把 360 推推机器人接入 DeepSeek Harness：私聊直接回复，群聊在 @机器人 后回复；回答由 Harness agent 生成，模型与工具跟随 Harness 配置。发送 /new 可开启新会话；/shell 等管理员指令仅限管理员账号列表内的用户使用。')),
     !loaded ? h('div', { className: 'dtui-card dtui-empty' }, '正在加载机器人状态…') : null,
     bots.map((bot) => h(BotCard, {
       key: bot.botId,
@@ -204,6 +293,12 @@ export function TuituiSettingsTab({ rpcCall }) {
       onDisable: handleDisable,
       onDelete: handleDelete,
     })),
+    loaded && status ? h(SecurityPanel, {
+      key: JSON.stringify(status.security ?? {}),
+      security: status.security,
+      busy,
+      onSave: handleSaveSecurity,
+    }) : null,
     showForm
       ? h(BindForm, { busy, onBind: handleBind })
       : h('div', { className: 'dtui-actions', style: { marginTop: 16 } },

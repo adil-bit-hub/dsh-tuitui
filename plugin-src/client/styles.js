@@ -47,6 +47,15 @@ const CSS = String.raw`
 .dtui-metaItem .v { margin-top: 2px; font-size: 14px; font-weight: 620; }
 .dtui-health { margin-top: 12px; font-size: 13px; color: var(--dsw-alias-label-secondary, #646a73); }
 .dtui-empty { padding: 8px 0 2px; font-size: 13px; color: var(--dsw-alias-label-tertiary, #8f959e); }
+.dtui-chips { display: flex; flex-wrap: wrap; gap: 8px; margin: 2px 0 10px; }
+.dtui-chip { display: inline-flex; align-items: center; gap: 6px; min-height: 26px; padding: 0 8px 0 12px; border-radius: 999px; font-size: 12.5px; font-weight: 560; background: var(--dtui-blue-soft); color: var(--dtui-blue); border: 1px solid color-mix(in srgb, var(--dtui-blue) 22%, transparent); }
+.dtui-chipX { display: inline-flex; align-items: center; justify-content: center; width: 18px; height: 18px; padding: 0; border: none; border-radius: 50%; background: transparent; color: inherit; font-size: 13px; line-height: 1; cursor: pointer; }
+.dtui-chipX:hover { background: color-mix(in srgb, var(--dtui-blue) 16%, transparent); }
+.dtui-chipInput { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.dtui-chipInput .dtui-input { flex: 1 1 240px; max-width: 360px; }
+.dtui-check { display: flex; align-items: center; gap: 8px; margin: 6px 0; font-size: 13px; color: var(--dsw-alias-label-primary, #1f2329); cursor: pointer; }
+.dtui-check input[type='checkbox'] { width: 16px; height: 16px; accent-color: var(--dtui-blue); cursor: pointer; }
+.dtui-formRow .dtui-hint { display: block; margin-top: 4px; }
 `;
 
 export function installTuituiStyles() {

@@ -8,6 +8,10 @@ function timeoutError() {
   return error;
 }
 
+function cleanString(value) {
+  return typeof value === 'string' ? value.trim() : '';
+}
+
 export function createTuituiRuntimeStatus() {
   return {
     startedAt: null,
@@ -35,6 +39,9 @@ export class TuituiRuntime {
   #replyTimeoutMs;
   #connectTimeoutMs;
   #createClient;
+  #getSecurity;
+  #workspace;
+  #shellTimeoutMs;
   #status = createTuituiRuntimeStatus();
   #client = null;
   #bridge = null;
@@ -49,6 +56,9 @@ export class TuituiRuntime {
     logger = console,
     replyTimeoutMs = 600_000,
     connectTimeoutMs = 30_000,
+    getSecurity = () => ({}),
+    workspace,
+    shellTimeoutMs = 120_000,
     createClient = (appId, appSecret) => new TuituiBotClient(appId, appSecret),
   }) {
     if (!config || !appSecret || !harness || !state) {
@@ -61,6 +71,9 @@ export class TuituiRuntime {
     this.#logger = logger;
     this.#replyTimeoutMs = replyTimeoutMs;
     this.#connectTimeoutMs = connectTimeoutMs;
+    this.#getSecurity = getSecurity;
+    this.#workspace = workspace;
+    this.#shellTimeoutMs = shellTimeoutMs;
     this.#createClient = createClient;
   }
 
@@ -93,13 +106,15 @@ export class TuituiRuntime {
     this.#bridge = new TuituiHarnessBridge({
       bot: {
         sendText: (target, text) => client.im.sendText({ to: target, text }).then(() => undefined),
-        sendFile: (target, filePath) => client.im.sendFile({ to: target, source: filePath }).then(() => undefined),
       },
       harness: this.#harness,
       state: this.#state,
       status: this.#status,
       logger: this.#logger,
       replyTimeoutMs: this.#replyTimeoutMs,
+      getSecurity: this.#getSecurity,
+      workspace: this.#workspace,
+      shellTimeoutMs: this.#shellTimeoutMs,
     });
 
     let readyResolve;
@@ -164,11 +179,16 @@ export class TuituiRuntime {
     const messageId = typeof body?.data?.msgid === 'string' && body.data.msgid
       ? body.data.msgid
       : `${body.cid}:${body.timestamp ?? Date.now()}`;
+    // 发送人身份：账号/uid 来自事件顶层，昵称兼容多种字段命名。
+    const senderName = cleanString(body.user_name ?? body.nick_name ?? body.nickname
+      ?? body.data?.user_name ?? body.data?.nick_name);
     this.#bridge?.accept({
       messageId,
       conversationId: body.cid,
       kind: isGroup ? 'group' : 'direct',
       senderId: body.user_account || body.uid,
+      senderUid: body.uid,
+      senderName,
       senderIsBot: body.user_is_bot === true,
       addressed: isGroup ? body?.data?.at_me === true : true,
       content,

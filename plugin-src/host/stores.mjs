@@ -1,6 +1,8 @@
 import { mkdir, readFile, rename, unlink, writeFile } from 'node:fs/promises';
 import { dirname } from 'node:path';
 
+import { normalizeSecurity } from './policy.mjs';
+
 async function atomicWrite(path, text) {
   await mkdir(dirname(path), { recursive: true });
   const tmp = `${path}.tmp`;
@@ -21,6 +23,7 @@ async function readJson(path) {
 export class TuituiConfigStore {
   #path;
   #bots = [];
+  #security = normalizeSecurity(undefined);
 
   constructor(path) {
     this.#path = path;
@@ -29,6 +32,7 @@ export class TuituiConfigStore {
   async load() {
     const raw = await readJson(this.#path);
     this.#bots = Array.isArray(raw?.bots) ? raw.bots : [];
+    this.#security = normalizeSecurity(raw?.security);
     return this;
   }
 
@@ -58,8 +62,25 @@ export class TuituiConfigStore {
     await this.#persist();
   }
 
+  /** 读取当前安全策略（管理员列表 + 非管理员能力开关）的副本。 */
+  getSecurity() {
+    const { adminAccounts, nonAdmin } = this.#security;
+    return { adminAccounts: [...adminAccounts], nonAdmin: { ...nonAdmin } };
+  }
+
+  /** 更新安全策略并落盘；入参会先经过归一化。 */
+  async setSecurity(security) {
+    this.#security = normalizeSecurity(security);
+    await this.#persist();
+    return this.getSecurity();
+  }
+
   async #persist() {
-    await atomicWrite(this.#path, JSON.stringify({ schemaVersion: 1, bots: this.#bots }, null, 2));
+    await atomicWrite(this.#path, JSON.stringify({
+      schemaVersion: 2,
+      bots: this.#bots,
+      security: this.#security,
+    }, null, 2));
   }
 }
 

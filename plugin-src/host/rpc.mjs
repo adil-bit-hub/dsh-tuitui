@@ -6,6 +6,8 @@ export const TUITUI_ENDPOINTS = Object.freeze({
   enableBot: 'bot.enable',
   disableBot: 'bot.disable',
   deleteBot: 'bot.delete',
+  getSecurity: 'security.get',
+  setSecurity: 'security.set',
 });
 
 const ENDPOINTS = Object.freeze(Object.values(TUITUI_ENDPOINTS));
@@ -41,10 +43,40 @@ function validAppSecret(value) {
   return typeof value === 'string' && value.trim().length >= 8 && value.length <= 512;
 }
 
+function validAdminAccount(value) {
+  return typeof value === 'string' && value.trim().length >= 1
+    && value.trim().length <= 64 && !/\s/.test(value.trim());
+}
+
+function validSecurityPayload(payload) {
+  if (!exactKeys(payload, ['adminAccounts', 'nonAdmin'])) {
+    return 'security.set 需要 adminAccounts 与 nonAdmin 字段。';
+  }
+  if (!Array.isArray(payload.adminAccounts) || payload.adminAccounts.length > 64) {
+    return '管理员列表需为数组且不超过 64 个账号。';
+  }
+  for (const account of payload.adminAccounts) {
+    if (!validAdminAccount(account)) return '管理员账号需为 1-64 个字符且不含空白。';
+  }
+  if (!exactKeys(payload.nonAdmin, ['chat'])) {
+    return 'nonAdmin 仅支持 chat 字段。';
+  }
+  if (typeof payload.nonAdmin.chat !== 'boolean') {
+    return 'nonAdmin.chat 需为布尔值。';
+  }
+  return null;
+}
+
 function payloadFailure(endpoint, payload) {
   if (!isRecord(payload)) return '请求体必须是对象。';
   if (endpoint === TUITUI_ENDPOINTS.status) {
     return exactKeys(payload, []) ? null : 'connection.status 不接受任何字段。';
+  }
+  if (endpoint === TUITUI_ENDPOINTS.getSecurity) {
+    return exactKeys(payload, []) ? null : 'security.get 不接受任何字段。';
+  }
+  if (endpoint === TUITUI_ENDPOINTS.setSecurity) {
+    return validSecurityPayload(payload);
   }
   if (endpoint === TUITUI_ENDPOINTS.bind) {
     if (!exactKeys(payload, ['appId', 'appSecret'])) return 'bot.bind 需要 appId 与 appSecret。';
@@ -84,7 +116,7 @@ function operationError(error) {
 }
 
 export function createTuituiRpcHandler(controller) {
-  for (const method of ['status', 'bind', 'enableBot', 'disableBot', 'deleteBot']) {
+  for (const method of ['status', 'bind', 'enableBot', 'disableBot', 'deleteBot', 'getSecurity', 'setSecurity']) {
     if (typeof controller?.[method] !== 'function') {
       throw new TypeError(`推推机器人控制器不完整，缺少 ${method}`);
     }
@@ -107,6 +139,13 @@ export function createTuituiRpcHandler(controller) {
         value = await controller.enableBot(payload.botId);
       } else if (endpoint === TUITUI_ENDPOINTS.disableBot) {
         value = await controller.disableBot(payload.botId);
+      } else if (endpoint === TUITUI_ENDPOINTS.getSecurity) {
+        value = { security: controller.getSecurity() };
+      } else if (endpoint === TUITUI_ENDPOINTS.setSecurity) {
+        value = await controller.setSecurity({
+          adminAccounts: payload.adminAccounts,
+          nonAdmin: payload.nonAdmin,
+        });
       } else {
         value = await controller.deleteBot(payload.botId);
       }

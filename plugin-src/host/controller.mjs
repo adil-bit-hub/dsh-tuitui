@@ -1,5 +1,7 @@
 import { TuituiBotClient } from '@qihoo/tuitui-bot-sdk';
 
+import { normalizeSecurity } from './policy.mjs';
+
 function cleanString(value) {
   return typeof value === 'string' && value.trim() ? value.trim() : null;
 }
@@ -216,6 +218,20 @@ export class TuituiBotController {
     });
   }
 
+  /** 读取当前安全策略（管理员账号列表 + 非管理员能力开关）。 */
+  getSecurity() {
+    return this.#configStore.getSecurity();
+  }
+
+  /** 更新安全策略，立即落盘并对后续消息生效。 */
+  async setSecurity(security) {
+    if (this.#closed) throw new Error('推推机器人控制器已关闭');
+    const normalized = normalizeSecurity(security);
+    await this.#configStore.setSecurity(normalized);
+    this.#touch();
+    return this.status();
+  }
+
   status() {
     const bots = this.#configStore.list().map((config) => {
       const runtimeStatus = this.#runtimes.get(config.botId)?.status ?? null;
@@ -254,14 +270,17 @@ export class TuituiBotController {
           messagesRejected: runtimeStatus?.messagesRejected ?? 0,
           lastMessageAt: runtimeStatus?.lastMessageAt ?? null,
           lastReplyAt: runtimeStatus?.lastReplyAt ?? null,
+          lastSenderName: runtimeStatus?.lastSenderName ?? null,
+          lastSenderAccount: runtimeStatus?.lastSenderAccount ?? null,
         },
         error: structuredClone(this.#errors.get(config.botId) ?? null),
       };
     });
     const connectedCount = bots.filter((bot) => bot.connected).length;
     return {
-      schemaVersion: 1,
+      schemaVersion: 2,
       revision: this.#revision,
+      security: this.#configStore.getSecurity(),
       state: bots.length === 0 ? 'disconnected'
         : connectedCount === bots.length ? 'connected'
           : connectedCount > 0 ? 'degraded' : bots.every((bot) => bot.state === 'stopped') ? 'stopped' : 'offline',

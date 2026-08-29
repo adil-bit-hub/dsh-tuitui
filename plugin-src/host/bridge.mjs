@@ -1,10 +1,11 @@
 import {
-  createAndSendFile,
-  extractCreateFileMarker,
-  extractFileMarker,
-  matchSendFileCommand,
-  sendLocalFile,
-} from './files.mjs';
+  canUseCapability,
+  isTuituiAdmin,
+  normalizeSecurity,
+  senderDisplayName,
+  senderRole,
+} from './policy.mjs';
+import { runShellCommand } from './shell.mjs';
 
 function cleanText(value) {
   return typeof value === 'string' ? value.trim() : '';
@@ -18,13 +19,19 @@ export function createTuituiBridgeStatus() {
     lastMessageAt: null,
     lastReplyAt: null,
     lastRejectedAt: null,
+    lastSenderName: null,
+    lastSenderAccount: null,
     lastError: null,
   };
 }
 
+const SHELL_COMMAND_PATTERN = /^\s*\/(?:shell|exec|run)\s+([\s\S]+)$/i;
+const SHELL_COMMAND_BARE = /^\s*\/(?:shell|exec|run)\s*$/i;
+
 /**
  * 把推推入站消息转发给 Harness agent，并把回答发回推推。
- * bot 接口：{ sendText(target, text), sendFile(target, filePath) }，target 为推推 ToTarget。
+ * bot 接口：{ sendText(target, text) }，target 为推推 ToTarget。
+ * 安全策略通过 getSecurity() 逐条消息实时读取，设置页修改后立即生效。
  */
 export class TuituiHarnessBridge {
   #bot;
@@ -33,6 +40,9 @@ export class TuituiHarnessBridge {
   #status;
   #logger;
   #replyTimeoutMs;
+  #getSecurity;
+  #workspace;
+  #shellTimeoutMs;
   #queues = new Map();
 
   constructor({
@@ -42,6 +52,9 @@ export class TuituiHarnessBridge {
     status = createTuituiBridgeStatus(),
     logger = console,
     replyTimeoutMs = 600_000,
+    getSecurity = () => undefined,
+    workspace,
+    shellTimeoutMs = 120_000,
   }) {
     if (!bot || typeof bot.sendText !== 'function') throw new TypeError('A bot client is required');
     if (!harness || !state) throw new TypeError('Harness client and state store are required');
@@ -51,6 +64,9 @@ export class TuituiHarnessBridge {
     this.#status = status;
     this.#logger = logger;
     this.#replyTimeoutMs = replyTimeoutMs;
+    this.#getSecurity = getSecurity;
+    this.#workspace = workspace;
+    this.#shellTimeoutMs = shellTimeoutMs;
   }
 
   get status() {
@@ -82,8 +98,18 @@ export class TuituiHarnessBridge {
     if (!messageId || !senderId || !message.conversationId || message.senderIsBot === true) return;
     if (this.#state.hasSeen(messageId)) return;
 
+    // 发送人身份识别：昵称 + 账号 + 管理员判定，随每条消息实时解析。
+    const senderName = cleanText(message.senderName);
+    const senderLabel = senderDisplayName({ senderName, senderId, senderUid: message.senderUid });
+    const security = this.#currentSecurity();
+    const isAdmin = isTuituiAdmin(security, { account: senderId, uid: message.senderUid });
+
     this.#status.messagesReceived += 1;
     this.#status.lastMessageAt = new Date().toISOString();
+    this.#status.lastSenderName = senderName || senderId;
+    this.#status.lastSenderAccount = senderId;
+    this.#logger.info?.(`[dsh-tuitui] message from ${senderLabel}${isAdmin ? ' (管理员)' : ''}`);
+
     if (message.kind === 'group' && message.addressed !== true) {
       this.#status.messagesRejected += 1;
       this.#status.lastRejectedAt = new Date().toISOString();
@@ -99,19 +125,45 @@ export class TuituiHarnessBridge {
         return;
       }
 
-      // 1) 显式文件指令（/send、发送文件...）
-      const sendFileArg = matchSendFileCommand(text);
-      if (sendFileArg) {
-        const result = await sendLocalFile({ bot: this.#bot, to: target, input: text });
-        if (!result.ok) {
-          await this.#bot.sendText(target, `\`${result.message}\``);
-        }
+      // 1) shell 级指令（/shell、/exec、/run），永远仅限管理员
+      if (SHELL_COMMAND_BARE.test(text)) {
+        await this.#bot.sendText(target, `用法：/shell <命令>\n示例：/shell dir${isAdmin ? '' : `\n注意：该指令仅限管理员，当前身份：${senderLabel}。`}`);
         await this.#state.markSeen(messageId);
         return;
       }
+      const shellMatch = SHELL_COMMAND_PATTERN.exec(text);
+      if (shellMatch) {
+        if (!canUseCapability(security, 'shell', isAdmin)) {
+          await this.#deny(target, '「/shell」是管理员专属指令', senderLabel);
+          await this.#state.markSeen(messageId);
+          return;
+        }
+        const commandLine = shellMatch[1].trim();
+        await this.#bot.sendText(target, `正在执行 shell 指令，请稍候…\n$ ${commandLine}`);
+        const result = await runShellCommand(commandLine, {
+          cwd: this.#workspace,
+          timeoutMs: this.#shellTimeoutMs,
+        });
+        await this.#bot.sendText(target, result.text);
+        await this.#state.markSeen(messageId);
+        this.#status.messagesReplied += 1;
+        this.#status.lastReplyAt = new Date().toISOString();
+        return;
+      }
 
-      // 2) 指令处理
+      // 2) 会话管理指令（对所有人开放）
       const command = text.toLowerCase();
+      if (command === '/whoami') {
+        await this.#bot.sendText(target, [
+          '你的推推身份：',
+          `昵称：${senderName || '（未提供）'}`,
+          `账号：${senderId}`,
+          `UID：${message.senderUid ?? '（未知）'}`,
+          `权限：${isAdmin ? '管理员' : '普通用户'}`,
+        ].join('\n'));
+        await this.#state.markSeen(messageId);
+        return;
+      }
       if (command === '/help') {
         await this.#bot.sendText(target, [
           '推推机器人已连接 DeepSeek Harness。',
@@ -119,18 +171,18 @@ export class TuituiHarnessBridge {
           '直接发送文字即可继续当前会话。',
           '/new  开启一个全新会话',
           '/status  检查连接状态',
+          '/whoami  查看我的身份信息',
           '/help  显示本帮助',
           '',
-          '文件操作：',
-          '  /send <路径>  发送本地文件',
-          '  发送文件 <路径>  同上',
+          '管理员指令：',
+          '  /shell <命令>  在本机执行 shell 命令',
         ].join('\n'));
         await this.#state.markSeen(messageId);
         return;
       }
       if (command === '/status') {
         await this.#harness.ensureRunning();
-        await this.#bot.sendText(target, '推推机器人与 DeepSeek Harness 连接正常。');
+        await this.#bot.sendText(target, `推推机器人与 DeepSeek Harness 连接正常。\n当前身份：${senderLabel}${isAdmin ? '（管理员）' : ''}`);
         await this.#state.markSeen(messageId);
         return;
       }
@@ -142,52 +194,25 @@ export class TuituiHarnessBridge {
         return;
       }
 
-      // 3) 交给 Harness 生成回复
+      // 3) 普通对话，受 chat 能力开关控制
+      if (!canUseCapability(security, 'chat', isAdmin)) {
+        await this.#deny(target, '当前机器人对话仅向管理员开放', senderLabel);
+        await this.#state.markSeen(messageId);
+        return;
+      }
+
+      // 4) 交给 Harness 生成回复；提问以「账号(角色)：内容」呈现，记录发送人身份
       let sessionId = this.#state.sessionFor(conversationKey);
       if (!sessionId || !(await this.#harness.sessionExists(sessionId))) {
         sessionId = await this.#harness.createSession();
         await this.#state.setSession(conversationKey, sessionId);
       }
 
-      const answer = await this.#harness.ask(sessionId, text, {
+      const senderIdentity = senderId || senderName || String(message.senderUid ?? '') || 'unknown';
+      const prompt = `${senderIdentity}(${senderRole(isAdmin)})：${text}`;
+      const answer = await this.#harness.ask(sessionId, prompt, {
         timeoutMs: this.#replyTimeoutMs,
       });
-
-      // 4) 解析 AI 回复中的文件协议标记：优先创建文件，其次发送已有文件
-      const createMarker = extractCreateFileMarker(answer);
-      const fileMarker = extractFileMarker(answer);
-      let sendResult = null;
-
-      if (createMarker) {
-        sendResult = await createAndSendFile({
-          bot: this.#bot,
-          to: target,
-          path: createMarker.path,
-          content: createMarker.content,
-        });
-      } else if (fileMarker) {
-        sendResult = await sendLocalFile({
-          bot: this.#bot,
-          to: target,
-          input: `发送文件 ${fileMarker}`,
-        });
-      }
-
-      if (sendResult) {
-        // AI 生成的说明文字（[FILE_DONE] 之后/ [FILE] 之后的自然语言部分）作为消息发出
-        const note = createMarker ? answer.split('[FILE_DONE]')[1] ?? '' : answer.replace(/^\s*\[FILE\][^\n]*\n?/, '');
-        if (sendResult.ok) {
-          const text = [note.trim(), `\`${sendResult.message}\``].filter(Boolean).join('\n') || '文件已发送';
-          await this.#bot.sendText(target, text);
-        } else {
-          await this.#bot.sendText(target, `文件操作未完成：${sendResult.message}`);
-        }
-        await this.#state.markSeen(messageId);
-        this.#status.messagesReplied += 1;
-        this.#status.lastReplyAt = new Date().toISOString();
-        this.#status.lastError = null;
-        return;
-      }
 
       // 5) 普通文本回复
       await this.#bot.sendText(target, answer);
@@ -205,5 +230,21 @@ export class TuituiHarnessBridge {
         this.#logger.error?.('[dsh-tuitui] failed to send the safe error reply:', sendError);
       }
     }
+  }
+
+  /** 逐条消息实时读取最新安全策略，读取失败时退回默认策略。 */
+  #currentSecurity() {
+    try {
+      return normalizeSecurity(this.#getSecurity?.());
+    } catch (error) {
+      this.#logger.warn?.('[dsh-tuitui] failed to read security policy, using defaults:', error);
+      return normalizeSecurity(undefined);
+    }
+  }
+
+  async #deny(target, reason, senderLabel) {
+    this.#status.messagesRejected += 1;
+    this.#status.lastRejectedAt = new Date().toISOString();
+    await this.#bot.sendText(target, `${reason}。\n当前身份：${senderLabel}。如需权限，请联系管理员在 Harness 设置页将你加入管理员列表。`);
   }
 }
