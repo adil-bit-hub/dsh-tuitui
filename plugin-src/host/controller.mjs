@@ -16,7 +16,7 @@ function connectionFailure(error) {
   if (/\b401\b/.test(raw) || /unauthorized/i.test(raw)) {
     return safeError(
       'connection-unauthorized',
-      '推推开放平台返回 401：App Secret 可能已失效或被轮换，请在设置页删除后重新接入。',
+      '推推开放平台拒绝了当前凭据（401）：App Secret 可能已失效或被轮换。请在设置页点「接入另一个机器人」，用相同 App ID + 新的 App Secret 接入即可直接更新凭据（无需删除，会话映射会保留）。',
     );
   }
   if (/timeout|ETIMEDOUT|ENOTFOUND|ECONNREFUSED|ECONNRESET/i.test(raw)) {
