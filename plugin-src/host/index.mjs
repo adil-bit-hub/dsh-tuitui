@@ -24,7 +24,7 @@ function pluginPaths(config) {
 }
 
 /** 轻量巡检：确保已启用的机器人保持连接，失败按退避重试。 */
-function createSupervisor({ controller, logger, healthyIntervalMs = 15_000, retryDelaysMs }) {
+function createSupervisor({ controller, logger, healthyIntervalMs = 15_000, retryDelaysMs, staleConnectionRefreshMs = 30 * 60_000 }) {
   const retryDelays = Array.isArray(retryDelaysMs) && retryDelaysMs.length > 0
     ? retryDelaysMs : [...DEFAULT_RETRY_DELAYS_MS];
   let closed = false;
@@ -55,6 +55,8 @@ function createSupervisor({ controller, logger, healthyIntervalMs = 15_000, retr
   async function reconcile() {
     try {
       const status = await controller.initialize();
+      if (closed) return;
+      await controller.refreshStaleConnections({ idleMs: staleConnectionRefreshMs });
       if (closed) return;
       const { configured, connected, stopped } = status.totals;
       if (connected + stopped < configured) {
@@ -167,6 +169,7 @@ export async function apply(ctx, config = {}) {
     logger,
     healthyIntervalMs: config.healthyIntervalMs,
     retryDelaysMs: config.retryDelaysMs,
+    staleConnectionRefreshMs: config.staleConnectionRefreshMs ?? 30 * 60_000,
   }).start();
 
   const disposeRpc = installTuituiRpc(ctx, controller, logger);

@@ -20,6 +20,8 @@ export function createTuituiRuntimeStatus() {
     harnessReachable: false,
     lastCheckedAt: null,
     lastConnectedAt: null,
+    lastDisconnectedAt: null,
+    lastEventAt: null,
     lastError: null,
     ...createTuituiBridgeStatus(),
   };
@@ -149,7 +151,17 @@ export class TuituiRuntime {
       onConnected: markConnected,
       onEvent: (body) => this.#onEvent(body),
       onDisconnected: (reason) => {
-        this.#logger.warn?.(`[dsh-tuitui] bot ${this.#config.botId} disconnected (SDK 自动重连中):`, reason?.message ?? reason);
+        // SDK 会自行重连，但「已连接」状态必须立即失效：否则控制器会一直
+        // 认为机器人健康，永远不会重建连接（长连接僵死时的常见故障）。
+        this.#status.ready = false;
+        this.#status.connectionState = 'disconnected';
+        this.#status.lastCheckedAt = Date.now();
+        this.#status.lastDisconnectedAt = Date.now();
+        this.#status.lastError = reason?.message ?? String(reason ?? '连接已断开');
+        this.#logger.warn?.(
+          `[dsh-tuitui] bot ${this.#config.botId} disconnected (SDK 自动重连中):`,
+          reason?.message ?? reason,
+        );
       },
       onError: (error) => {
         this.#status.lastError = error?.message ?? String(error);
@@ -181,6 +193,7 @@ export class TuituiRuntime {
   #onEvent(body) {
     const eventName = body?.event;
     if (eventName !== this.#client.event.SINGLE_CHAT && eventName !== this.#client.event.GROUP_CHAT) return;
+    this.#status.lastEventAt = new Date().toISOString();
     const isGroup = eventName === this.#client.event.GROUP_CHAT;
     let content = '';
     try {

@@ -279,6 +279,7 @@ export class TuituiBotController {
           messagesRejected: runtimeStatus?.messagesRejected ?? 0,
           lastMessageAt: runtimeStatus?.lastMessageAt ?? null,
           lastReplyAt: runtimeStatus?.lastReplyAt ?? null,
+          lastEventAt: runtimeStatus?.lastEventAt ?? null,
           lastSenderName: runtimeStatus?.lastSenderName ?? null,
           lastSenderAccount: runtimeStatus?.lastSenderAccount ?? null,
           lastSenderRole: runtimeStatus?.lastSenderRole ?? null,
@@ -301,6 +302,43 @@ export class TuituiBotController {
         stopped: bots.filter((bot) => bot.state === 'stopped').length,
       },
     };
+  }
+
+  /**
+   * 重建「已连接但长期没有任何事件」的空闲长连接。
+   *
+   * 推推平台偶发把早期建立的 WebSocket 变成只发心跳、不再推送消息事件的
+   * 空连接；此时 `ready` 仍为 true，普通健康检查发现不了。这里在连接建立
+   * 超过 `idleMs` 且从未收到任何聊天事件时，重建一次运行时（换一条新连接）。
+   *
+   * @param {{ idleMs?: number }} [options]
+   * @returns {Promise<string[]>} 被重建的 botId 列表。
+   */
+  async refreshStaleConnections({ idleMs = 30 * 60_000 } = {}) {
+    if (this.#closed) return [];
+    const rebuilt = [];
+    const now = Date.now();
+    for (const config of this.#configStore.list()) {
+      if (config.enabled === false) continue;
+      const runtime = this.#runtimes.get(config.botId);
+      const runtimeStatus = runtime?.status;
+      if (!runtimeStatus?.ready || runtimeStatus.lastEventAt !== null) continue;
+      const connectedAt = Date.parse(runtimeStatus.lastConnectedAt ?? '');
+      if (!Number.isFinite(connectedAt) || now - connectedAt < idleMs) continue;
+      const secret = await this.#resolveSecret(config.secretRef);
+      if (!secret) continue;
+      try {
+        await this.#withBotTransition(config.botId, () => this.#startRuntime(config, secret));
+        rebuilt.push(config.botId);
+        this.#logger.info?.(
+          `[dsh-tuitui] bot ${config.botId} 已连接 ${Math.round((now - connectedAt) / 60_000)} 分钟但未收到任何事件，已重建连接`,
+        );
+      } catch (error) {
+        this.#logger.warn?.(`[dsh-tuitui] bot ${config.botId} 空闲连接重建失败:`, error);
+      }
+    }
+    if (rebuilt.length > 0) this.#touch();
+    return rebuilt;
   }
 
   async close() {
