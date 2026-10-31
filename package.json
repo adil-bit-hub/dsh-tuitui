@@ -1,12 +1,13 @@
 {
   "name": "dsh-tuitui",
-  "version": "0.1.0",
-  "description": "把 360 推推（Tuitui）IM 机器人接入 DeepSeek Harness，由 Harness agent 收发消息，可在设置页启用/停止。",
+  "version": "0.2.0",
+  "description": "把 360 推推（Tuitui）IM 机器人接入 DeepSeek Harness：管理员使用完整 agent，成员仅问答且无工具/技能；可在设置页启用、停止与删除。",
   "license": "MIT",
   "type": "module",
   "main": "./lib/index.js",
   "exports": {
     ".": "./lib/index.js",
+    "./member-guard": "./lib/member-guard.js",
     "./client": "./lib/client.js",
     "./package.json": "./package.json"
   },
@@ -17,37 +18,36 @@
   ],
   "repository": {
     "type": "git",
-    "url": "https://github.com/tragic52/dsh-tuitui.git"
+    "url": "git+https://github.com/adil-bit-hub/dsh-tuitui.git"
+  },
+  "homepage": "https://github.com/adil-bit-hub/dsh-tuitui#readme",
+  "bugs": {
+    "url": "https://github.com/adil-bit-hub/dsh-tuitui/issues"
   },
   "keywords": [
     "dsh",
     "deepseek-harness",
+    "dsh-plugin",
     "tuitui",
     "im-bot",
     "360 推推",
     "chatbot"
   ],
-  "bugs": {
-    "url": "https://github.com/tragic52/dsh-tuitui/issues"
-  },
-  "author": "tragic52",
+  "author": "adil-bit-hub",
   "dsh": {
     "bundle": {
       "patch": "./cordis.patch.yml"
     },
     "client": {
+      "platform": "web",
       "inject": [
-        "@deepseek-ai/dsh-client-connection",
-        "@deepseek-ai/dsh-client-runtime",
-        "@deepseek-ai/dsh-client-ui-settings",
-        "@deepseek-ai/dsh-client-ui-slots",
-        "@deepseek-ai/dsh-client-locale"
-      ],
-      "platform": "web"
+        "@deepseek-ai/dsh-client-ui-settings"
+      ]
     }
   },
   "scripts": {
-    "build": "node plugin-src/host/build.mjs && node plugin-src/client/build.mjs"
+    "build": "node plugin-src/host/build.mjs && node plugin-src/client/build.mjs",
+    "test": "node --test"
   },
   "engines": {
     "node": ">=22.19"

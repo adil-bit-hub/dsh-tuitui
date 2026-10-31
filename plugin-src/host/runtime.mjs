@@ -42,6 +42,9 @@ export class TuituiRuntime {
   #getSecurity;
   #workspace;
   #shellTimeoutMs;
+  #adminPreset;
+  #memberPreset;
+  #ensureMemberPreset;
   #status = createTuituiRuntimeStatus();
   #client = null;
   #bridge = null;
@@ -59,6 +62,9 @@ export class TuituiRuntime {
     getSecurity = () => ({}),
     workspace,
     shellTimeoutMs = 120_000,
+    adminPreset,
+    memberPreset,
+    ensureMemberPreset,
     createClient = (appId, appSecret) => new TuituiBotClient(appId, appSecret),
   }) {
     if (!config || !appSecret || !harness || !state) {
@@ -74,6 +80,9 @@ export class TuituiRuntime {
     this.#getSecurity = getSecurity;
     this.#workspace = workspace;
     this.#shellTimeoutMs = shellTimeoutMs;
+    this.#adminPreset = adminPreset;
+    this.#memberPreset = memberPreset;
+    this.#ensureMemberPreset = ensureMemberPreset;
     this.#createClient = createClient;
   }
 
@@ -95,7 +104,7 @@ export class TuituiRuntime {
     this.#status.startedAt = new Date().toISOString();
     this.#status.connectionState = 'connecting';
     this.#status.lastError = null;
-    await this.#harness.ensureRunning();
+    // 插件与 Harness 同进程，sessionController 已由依赖注入保证可用。
     this.#status.harnessReachable = true;
 
     const client = this.#createClient(this.#config.appId, this.#appSecret);
@@ -115,6 +124,9 @@ export class TuituiRuntime {
       getSecurity: this.#getSecurity,
       workspace: this.#workspace,
       shellTimeoutMs: this.#shellTimeoutMs,
+      adminPreset: this.#adminPreset,
+      memberPreset: this.#memberPreset,
+      ensureMemberPreset: this.#ensureMemberPreset,
     });
 
     let readyResolve;

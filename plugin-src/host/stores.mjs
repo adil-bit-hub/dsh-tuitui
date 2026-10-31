@@ -123,6 +123,18 @@ export class TuituiStateStore {
     await this.#persist();
   }
 
+  /** 批量清除会话映射（角色分流后一次清理管理员/成员/旧格式键）。 */
+  async clearSessions(conversationKeys) {
+    let changed = false;
+    for (const key of conversationKeys ?? []) {
+      if (key in this.#sessions) {
+        delete this.#sessions[key];
+        changed = true;
+      }
+    }
+    if (changed) await this.#persist();
+  }
+
   hasSeen(messageId) {
     return this.#seenSet.has(messageId);
   }

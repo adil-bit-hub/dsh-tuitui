@@ -21,6 +21,7 @@ export function createTuituiBridgeStatus() {
     lastRejectedAt: null,
     lastSenderName: null,
     lastSenderAccount: null,
+    lastSenderRole: null,
     lastError: null,
   };
 }
@@ -32,6 +33,10 @@ const SHELL_COMMAND_BARE = /^\s*\/(?:shell|exec|run)\s*$/i;
  * 把推推入站消息转发给 Harness agent，并把回答发回推推。
  * bot 接口：{ sendText(target, text) }，target 为推推 ToTarget。
  * 安全策略通过 getSecurity() 逐条消息实时读取，设置页修改后立即生效。
+ *
+ * 角色分流：管理员（manager）使用完整 agent 预设（可带工具、技能）；
+ * 非管理员（member）使用受限预设（无工具、无技能，只能问答），
+ * 且 /shell 等操作类指令永远只对管理员开放。
  */
 export class TuituiHarnessBridge {
   #bot;
@@ -43,6 +48,9 @@ export class TuituiHarnessBridge {
   #getSecurity;
   #workspace;
   #shellTimeoutMs;
+  #adminPreset;
+  #memberPreset;
+  #ensureMemberPreset;
   #queues = new Map();
 
   constructor({
@@ -55,6 +63,9 @@ export class TuituiHarnessBridge {
     getSecurity = () => undefined,
     workspace,
     shellTimeoutMs = 120_000,
+    adminPreset,
+    memberPreset,
+    ensureMemberPreset = async () => true,
   }) {
     if (!bot || typeof bot.sendText !== 'function') throw new TypeError('A bot client is required');
     if (!harness || !state) throw new TypeError('Harness client and state store are required');
@@ -67,6 +78,9 @@ export class TuituiHarnessBridge {
     this.#getSecurity = getSecurity;
     this.#workspace = workspace;
     this.#shellTimeoutMs = shellTimeoutMs;
+    this.#adminPreset = adminPreset ?? harness.agentPreset ?? 'standard';
+    this.#memberPreset = memberPreset ?? harness.memberAgentPreset ?? 'tuitui-member';
+    this.#ensureMemberPreset = ensureMemberPreset;
   }
 
   get status() {
@@ -103,12 +117,14 @@ export class TuituiHarnessBridge {
     const senderLabel = senderDisplayName({ senderName, senderId, senderUid: message.senderUid });
     const security = this.#currentSecurity();
     const isAdmin = isTuituiAdmin(security, { account: senderId, uid: message.senderUid });
+    const role = senderRole(isAdmin);
 
     this.#status.messagesReceived += 1;
     this.#status.lastMessageAt = new Date().toISOString();
     this.#status.lastSenderName = senderName || senderId;
     this.#status.lastSenderAccount = senderId;
-    this.#logger.info?.(`[dsh-tuitui] message from ${senderLabel}${isAdmin ? ' (管理员)' : ''}`);
+    this.#status.lastSenderRole = role;
+    this.#logger.info?.(`[dsh-tuitui] message from ${senderLabel}${isAdmin ? ' (管理员)' : ' (member)'}`);
 
     if (message.kind === 'group' && message.addressed !== true) {
       this.#status.messagesRejected += 1;
@@ -159,7 +175,7 @@ export class TuituiHarnessBridge {
           `昵称：${senderName || '（未提供）'}`,
           `账号：${senderId}`,
           `UID：${message.senderUid ?? '（未知）'}`,
-          `权限：${isAdmin ? '管理员' : '普通用户'}`,
+          `权限：${isAdmin ? '管理员（manager）' : '成员（member，仅问答）'}`,
         ].join('\n'));
         await this.#state.markSeen(messageId);
         return;
@@ -174,21 +190,28 @@ export class TuituiHarnessBridge {
           '/whoami  查看我的身份信息',
           '/help  显示本帮助',
           '',
+          isAdmin
+            ? '你是管理员：可执行 /shell <命令> 等操作类指令。'
+            : '你是成员（member）：只能问答，无法调用工具、技能或执行任何操作。',
           '管理员指令：',
-          '  /shell <命令>  在本机执行 shell 命令',
+          '  /shell <命令>  在本机执行 shell 命令（仅管理员）',
         ].join('\n'));
         await this.#state.markSeen(messageId);
         return;
       }
       if (command === '/status') {
-        await this.#harness.ensureRunning();
-        await this.#bot.sendText(target, `推推机器人与 DeepSeek Harness 连接正常。\n当前身份：${senderLabel}${isAdmin ? '（管理员）' : ''}`);
+        await this.#bot.sendText(target, `推推机器人与 DeepSeek Harness 连接正常。\n当前身份：${senderLabel}（${isAdmin ? '管理员' : '成员/member'}）`);
         await this.#state.markSeen(messageId);
         return;
       }
-      const conversationKey = `${message.kind}:${message.conversationId}`;
+      // 会话按「会话 + 角色」隔离：管理员与成员各自拥有独立上下文，
+      // 避免成员复用管理员的（带工具）会话。旧版本键（无角色）一并清理。
       if (command === '/new') {
-        await this.#state.clearSession(conversationKey);
+        await this.#state.clearSessions([
+          `${message.kind}:${message.conversationId}:manager`,
+          `${message.kind}:${message.conversationId}:member`,
+          `${message.kind}:${message.conversationId}`,
+        ]);
         await this.#bot.sendText(target, '已开启新会话。请发送你的问题。');
         await this.#state.markSeen(messageId);
         return;
@@ -201,20 +224,45 @@ export class TuituiHarnessBridge {
         return;
       }
 
-      // 4) 交给 Harness 生成回复；提问以「账号(角色)：内容」呈现，记录发送人身份
-      let sessionId = this.#state.sessionFor(conversationKey);
-      if (!sessionId || !(await this.#harness.sessionExists(sessionId))) {
-        sessionId = await this.#harness.createSession();
-        await this.#state.setSession(conversationKey, sessionId);
+      // 4) 成员必须使用「无工具、无技能」的受限预设；预设未就绪时拒绝服务，
+      //    绝不回退到管理员预设，避免成员获得操作能力。
+      if (!isAdmin) {
+        const ready = await this.#ensureMemberPreset();
+        if (!ready) {
+          this.#status.messagesRejected += 1;
+          this.#status.lastRejectedAt = new Date().toISOString();
+          await this.#bot.sendText(target, '成员问答模式尚未就绪（受限预设未加载），请稍后重试或联系管理员。');
+          await this.#state.markSeen(messageId);
+          return;
+        }
       }
 
+      // 5) 交给 Harness 生成回复；提问以「账号(角色)：内容」呈现，记录发送人身份
+      const conversationKey = `${message.kind}:${message.conversationId}:${role}`;
+      const preset = isAdmin ? this.#adminPreset : this.#memberPreset;
       const senderIdentity = senderId || senderName || String(message.senderUid ?? '') || 'unknown';
-      const prompt = `${senderIdentity}(${senderRole(isAdmin)})：${text}`;
-      const answer = await this.#harness.ask(sessionId, prompt, {
-        timeoutMs: this.#replyTimeoutMs,
-      });
+      const prompt = `${senderIdentity}(${role})：${text}`;
 
-      // 5) 普通文本回复
+      // 会话可能已被删除/归档：自动重建一次再重试，避免长期失效。
+      // （不做逐条存在的探测，避免长会话每次消息都扫描日志。）
+      let answer = null;
+      for (let attempt = 0; attempt < 2 && answer === null; attempt += 1) {
+        let sessionId = this.#state.sessionFor(conversationKey);
+        if (!sessionId) {
+          sessionId = await this.#harness.createSession(preset);
+          await this.#state.setSession(conversationKey, sessionId);
+        }
+        try {
+          answer = await this.#harness.ask(sessionId, prompt, {
+            timeoutMs: this.#replyTimeoutMs,
+          });
+        } catch (error) {
+          if (error?.code !== 'session-not-found' || attempt > 0) throw error;
+          await this.#state.clearSession(conversationKey);
+        }
+      }
+
+      // 6) 普通文本回复
       await this.#bot.sendText(target, answer);
       await this.#state.markSeen(messageId);
       this.#status.messagesReplied += 1;

@@ -10,6 +10,21 @@ function safeError(code, message) {
   return Object.freeze({ code, message });
 }
 
+/** 把连接失败映射成不泄露凭据、但可操作的中文提示。 */
+function connectionFailure(error) {
+  const raw = String(error?.message ?? error ?? '');
+  if (/\b401\b/.test(raw) || /unauthorized/i.test(raw)) {
+    return safeError(
+      'connection-unauthorized',
+      '推推开放平台返回 401：App Secret 可能已失效或被轮换，请在设置页删除后重新接入。',
+    );
+  }
+  if (/timeout|ETIMEDOUT|ENOTFOUND|ECONNREFUSED|ECONNRESET/i.test(raw)) {
+    return safeError('connection-unreachable', '无法连接推推开放平台（网络异常），插件会自动重试。');
+  }
+  return safeError('connection-failed', '推推连接未就绪，插件会自动重试。');
+}
+
 function maskAppId(appId) {
   const text = String(appId ?? '');
   if (text.length <= 4) return text;
@@ -96,10 +111,7 @@ export class TuituiBotController {
           await this.#startRuntime(config, secret);
           this.#errors.delete(config.botId);
         } catch (error) {
-          this.#errors.set(config.botId, safeError(
-            'connection-failed',
-            '推推连接未就绪，插件会自动重试。',
-          ));
+          this.#errors.set(config.botId, connectionFailure(error));
           this.#logger.warn?.(`[dsh-tuitui] bot ${config.botId} failed to initialize:`, error);
         } finally {
           this.#touch();
@@ -145,10 +157,7 @@ export class TuituiBotController {
         await this.#startRuntime(config, normalizedSecret);
         this.#errors.delete(identity.botId);
       } catch (error) {
-        this.#errors.set(identity.botId, safeError(
-          'connection-failed',
-          '推推机器人已接入，消息连接暂未就绪，插件会自动重试。',
-        ));
+        this.#errors.set(identity.botId, connectionFailure(error));
         this.#logger.warn?.(`[dsh-tuitui] bot ${identity.botId} connection failed after bind:`, error);
       }
       this.#touch();
@@ -170,7 +179,7 @@ export class TuituiBotController {
         await this.#startRuntime({ ...config, enabled: true }, secret);
         this.#errors.delete(botId);
       } catch (error) {
-        this.#errors.set(botId, safeError('connection-failed', '推推连接未就绪，请稍后重试。'));
+        this.#errors.set(botId, connectionFailure(error));
         throw error;
       } finally {
         this.#touch();
@@ -272,6 +281,7 @@ export class TuituiBotController {
           lastReplyAt: runtimeStatus?.lastReplyAt ?? null,
           lastSenderName: runtimeStatus?.lastSenderName ?? null,
           lastSenderAccount: runtimeStatus?.lastSenderAccount ?? null,
+          lastSenderRole: runtimeStatus?.lastSenderRole ?? null,
         },
         error: structuredClone(this.#errors.get(config.botId) ?? null),
       };

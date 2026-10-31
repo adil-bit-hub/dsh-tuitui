@@ -6,18 +6,19 @@ import { build } from 'esbuild';
 
 const sourceDirectory = dirname(fileURLToPath(import.meta.url));
 const packageRoot = resolve(sourceDirectory, '../..');
-const outputPath = resolve(packageRoot, 'lib/index.js');
 
-await mkdir(dirname(outputPath), { recursive: true });
-await build({
-  entryPoints: [resolve(sourceDirectory, 'index.mjs')],
+await mkdir(resolve(packageRoot, 'lib'), { recursive: true });
+
+/** 共享的宿主端打包选项：esbuild 内联依赖，运行期零依赖。 */
+const hostBuild = (entry, outfile) => build({
+  entryPoints: [resolve(sourceDirectory, entry)],
   bundle: true,
   format: 'esm',
   platform: 'node',
   target: ['node22'],
   mainFields: ['module', 'main'],
   external: ['bufferutil', 'utf-8-validate'],
-  outfile: outputPath,
+  outfile: resolve(packageRoot, outfile),
   banner: {
     js: [
       "import { createRequire as __dshCreateRequire } from 'node:module';",
@@ -33,4 +34,8 @@ await build({
   legalComments: 'eof',
 });
 
-console.log(`Wrote ${outputPath}`);
+await hostBuild('index.mjs', 'lib/index.js');
+await hostBuild('member-guard.mjs', 'lib/member-guard.js');
+
+console.log(`Wrote ${resolve(packageRoot, 'lib/index.js')}`);
+console.log(`Wrote ${resolve(packageRoot, 'lib/member-guard.js')}`);

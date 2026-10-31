@@ -5,10 +5,37 @@ import { installTuituiStyles } from './styles.js';
 const h = React.createElement;
 
 export const name = 'tuitui-settings';
-export const inject = ['slots', 'connection'];
+export const inject = ['slots'];
 
 const RPC_CHANNEL = '/tuitui';
 const POLL_INTERVAL_MS = 4_000;
+
+/**
+ * 调用宿主插件路由。DSH 0.2.1 起第三方插件不能再用 `connection.rpc`，
+ * 改为同源 POST 到插件自己注册的 `/tuitui/<endpoint>`，由宿主复用
+ * Connection 的准入检查（Host/Origin 围栏 + 已认证会话）。
+ */
+async function requestJson(endpoint, payload) {
+  const response = await fetch(`${RPC_CHANNEL}/${endpoint}`, {
+    method: 'POST',
+    credentials: 'same-origin',
+    cache: 'no-store',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify(payload ?? {}),
+  });
+  if (response.status === 401 || response.status === 403) {
+    throw new Error('当前页面未通过 Harness 认证，请从 DSH 里打开本设置页后重试。');
+  }
+  if (!response.ok) throw new Error(`请求失败：HTTP ${response.status}`);
+  let body;
+  try {
+    body = await response.json();
+  } catch {
+    throw new Error('宿主返回了非 JSON 响应。');
+  }
+  if (body?.ok !== true) throw new Error(body?.error?.message ?? '推推机器人操作失败，请稍后重试。');
+  return body.value;
+}
 
 const STATE_LABELS = Object.freeze({
   connected: '已连接',
@@ -33,8 +60,18 @@ function StateBadge({ state }) {
     STATE_LABELS[state] ?? state);
 }
 
+function RoleTag({ role }) {
+  if (role === 'manager') return h('span', { className: 'dtui-role dtui-roleManager' }, '管理员');
+  if (role === 'member') return h('span', { className: 'dtui-role dtui-roleMember' }, '成员');
+  return null;
+}
+
 function BotCard({ bot, busy, onEnable, onDisable, onDelete }) {
   const stats = bot.stats ?? {};
+  const lastSender = stats.lastSenderName
+    ? `${stats.lastSenderName}${stats.lastSenderAccount && stats.lastSenderAccount !== stats.lastSenderName
+      ? `（${stats.lastSenderAccount}）` : ''}`
+    : null;
   const deleting = busy === `delete:${bot.botId}`;
   const [confirming, setConfirming] = React.useState(false);
   React.useEffect(() => {
@@ -58,9 +95,8 @@ function BotCard({ bot, busy, onEnable, onDisable, onDelete }) {
         h('div', { className: 'v' }, `${stats.messagesReceived ?? 0} / ${stats.messagesReplied ?? 0}`)),
       h('div', { className: 'dtui-metaItem' },
         h('div', { className: 'k' }, '最近发言人'),
-        h('div', { className: 'v' }, stats.lastSenderName
-          ? `${stats.lastSenderName}${stats.lastSenderAccount && stats.lastSenderAccount !== stats.lastSenderName
-            ? `（${stats.lastSenderAccount}）` : ''}`
+        h('div', { className: 'v' }, lastSender
+          ? [lastSender, ' · ', h(RoleTag, { key: 'role', role: stats.lastSenderRole })]
           : '—')),
       h('div', { className: 'dtui-metaItem' },
         h('div', { className: 'k' }, '最近消息'),
@@ -127,11 +163,11 @@ function SecurityPanel({ security, busy, onSave }) {
     h('div', { className: 'dtui-botHead' },
       h('div', { className: 'dtui-botName' },
         h('strong', null, '安全与管理员'),
-        h('span', { className: 'dtui-sub' }, '在推推里发送 /whoami 可查看自己的账号'))),
+        h('span', { className: 'dtui-sub' }, '在推推里发送 /whoami 可查看自己的账号与角色'))),
     h('p', { className: 'dtui-health' },
-      '/shell、/exec、/run 等 shell 级指令仅限管理员使用；其余能力可按下方开关控制是否向非管理员开放。'),
+      '管理员（manager）使用完整 Harness agent，可执行 /shell 等操作；不在列表内的账号一律是成员（member），只能问答，无法调用工具、技能或执行任何操作。'),
     h('div', { className: 'dtui-formRow' },
-      h('label', null, '管理员账号列表'),
+      h('label', null, '管理员账号列表（manager）'),
       accounts.length > 0
         ? h('div', { className: 'dtui-chips' }, accounts.map((account) => h('span', {
           key: account,
@@ -142,7 +178,7 @@ function SecurityPanel({ security, busy, onSave }) {
           'aria-label': `移除 ${account}`,
           onClick: () => setAccounts(accounts.filter((item) => item !== account)),
         }, '×'))))
-        : h('p', { className: 'dtui-empty' }, '尚未设置管理员，所有 shell 级指令都会被拒绝。'),
+        : h('p', { className: 'dtui-empty' }, '尚未设置管理员：所有账号都是成员（member）。'),
       h('div', { className: 'dtui-chipInput' },
         h('input', {
           className: 'dtui-input',
@@ -164,15 +200,16 @@ function SecurityPanel({ security, busy, onSave }) {
           onClick: addAccount,
         }, '添加'))),
     h('div', { className: 'dtui-formRow' },
-      h('label', null, '非管理员权限'),
+      h('label', null, '成员（member）能力'),
       h('label', { className: 'dtui-check' },
         h('input', {
           type: 'checkbox',
           checked: nonAdmin.chat,
           onChange: (event) => setNonAdmin({ ...nonAdmin, chat: event.target.checked }),
         }),
-        '允许普通对话（转交 Harness agent）'),
-      h('span', { className: 'dtui-hint' }, 'shell 级指令不支持向非管理员授权；取消勾选后非管理员将无法与机器人对话。')),
+        '允许成员问答（仅问答，不含任何工具或技能）'),
+      h('span', { className: 'dtui-hint' },
+        '成员会话固定使用「推推成员（仅问答）」受限预设：没有内置工具、Skill、终端与文件权限，也无法执行任何操作；取消勾选后成员将无法与机器人对话。')),
     h('div', { className: 'dtui-actions' },
       h('button', {
         type: 'button',
@@ -283,7 +320,7 @@ export function TuituiSettingsTab({ rpcCall }) {
 
   return h('section', { className: 'dtui-page', 'aria-label': '推推机器人设置' },
     h('header', { className: 'dtui-title' },
-      h('p', null, '把 360 推推机器人接入 DeepSeek Harness：私聊直接回复，群聊在 @机器人 后回复；回答由 Harness agent 生成，模型与工具跟随 Harness 配置。发送 /new 可开启新会话；/shell 等管理员指令仅限管理员账号列表内的用户使用。')),
+      h('p', null, '把 360 推推机器人接入 DeepSeek Harness：私聊直接回复，群聊在 @机器人 后回复；回答由 Harness agent 生成。管理员（manager）使用完整 agent 并可执行 /shell 等操作；不在管理员列表内的账号一律是成员（member），只能问答，无法使用任何工具或技能。发送 /new 可开启新会话。')),
     !loaded ? h('div', { className: 'dtui-card dtui-empty' }, '正在加载机器人状态…') : null,
     bots.map((bot) => h(BotCard, {
       key: bot.botId,
@@ -323,11 +360,13 @@ export function TuituiSettingsTab({ rpcCall }) {
 export function apply(ctx) {
   ctx.effect(() => installTuituiStyles(), 'tuitui-settings: install styles');
 
-  const rpcCall = (endpoint, payload, signal) =>
-    ctx.connection.rpc.call(RPC_CHANNEL, endpoint, payload, signal);
+  const rpcCall = (endpoint, payload, signal) => {
+    if (signal?.aborted) return Promise.reject(new Error('请求已取消。'));
+    return requestJson(endpoint, payload);
+  };
 
-  ctx.slots.inject('settings.plugins.tab', () => ctx.slots.register({
-    name: 'settings.plugins.tab',
+  ctx.slots.inject('settings.section', () => ctx.slots.register({
+    name: 'settings.section',
     id: 'tuitui',
     order: 25,
     label: '推推机器人',

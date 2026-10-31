@@ -4,23 +4,15 @@ import { join, resolve } from 'node:path';
 
 import { TuituiBotController } from './controller.mjs';
 import { HarnessClient } from './harness-client.mjs';
+import { DEFAULT_MEMBER_PRESET_ID, registerMemberPreset } from './preset.mjs';
 import { installTuituiRpc } from './rpc.mjs';
 import { TuituiRuntime } from './runtime.mjs';
 import { TuituiConfigStore, TuituiStateStore } from './stores.mjs';
 
 export const name = 'dsh-tuitui';
-export const inject = ['connection', 'credentials', 'webServer'];
+export const inject = ['connection', 'credentials', 'webServer', 'sessionController'];
 
 const DEFAULT_RETRY_DELAYS_MS = Object.freeze([1_000, 3_000, 5_000, 10_000, 30_000]);
-
-function harnessOrigin(webServer, configured) {
-  if (configured !== undefined) return new URL(configured);
-  const port = webServer?.port;
-  if (!Number.isInteger(port) || port < 1 || port > 65_535) {
-    throw new Error('dsh-tuitui 需要已初始化的 DSH webServer 端口');
-  }
-  return new URL(`http://127.0.0.1:${port}`);
-}
 
 function pluginPaths(config) {
   const dshHome = resolve(config.dshHome ?? process.env.DSH_HOME ?? join(homedir(), '.dsh'));
@@ -32,7 +24,7 @@ function pluginPaths(config) {
 }
 
 /** 轻量巡检：确保已启用的机器人保持连接，失败按退避重试。 */
-function createSupervisor({ controller, harness, logger, healthyIntervalMs = 15_000, retryDelaysMs }) {
+function createSupervisor({ controller, logger, healthyIntervalMs = 15_000, retryDelaysMs }) {
   const retryDelays = Array.isArray(retryDelaysMs) && retryDelaysMs.length > 0
     ? retryDelaysMs : [...DEFAULT_RETRY_DELAYS_MS];
   let closed = false;
@@ -62,8 +54,6 @@ function createSupervisor({ controller, harness, logger, healthyIntervalMs = 15_
 
   async function reconcile() {
     try {
-      await harness.ensureRunning();
-      if (closed) return;
       const status = await controller.initialize();
       if (closed) return;
       const { configured, connected, stopped } = status.totals;
@@ -119,13 +109,21 @@ export async function apply(ctx, config = {}) {
   };
 
   const workspacePath = resolve(config.workspace ?? process.cwd());
+  const memberPresetId = config.memberAgentPreset ?? DEFAULT_MEMBER_PRESET_ID;
+  const memberPreset = registerMemberPreset(ctx, {
+    id: memberPresetId,
+    name: config.memberPresetName,
+    description: config.memberPresetDescription,
+    logger,
+  });
+  const ensureMemberPreset = () => memberPreset.wait(config.memberPresetWaitMs ?? 15_000);
 
   const harness = new HarnessClient({
-    baseUrl: harnessOrigin(ctx.webServer, config.harnessBaseUrl),
+    sessionController: ctx.sessionController,
     workspace: workspacePath,
     agentPreset: config.agentPreset ?? 'standard',
-    autostart: false,
-    dshBin: config.dshBin ?? 'dsh',
+    memberAgentPreset: memberPresetId,
+    subscribeSessionEvents: (listener) => ctx.on('session/event', (session, event) => listener(session, event), { global: true }),
   });
 
   const controller = new TuituiBotController({
@@ -148,6 +146,9 @@ export async function apply(ctx, config = {}) {
       getSecurity: () => configStore.getSecurity(),
       workspace: workspacePath,
       shellTimeoutMs: config.shellTimeoutMs ?? 120_000,
+      adminPreset: config.agentPreset ?? 'standard',
+      memberPreset: memberPresetId,
+      ensureMemberPreset,
     }),
     deleteState: async ({ botId }) => {
       const state = stateStores.get(botId);
@@ -163,18 +164,16 @@ export async function apply(ctx, config = {}) {
 
   const supervisor = createSupervisor({
     controller,
-    harness,
     logger,
     healthyIntervalMs: config.healthyIntervalMs,
     retryDelaysMs: config.retryDelaysMs,
   }).start();
 
-  const disposeRpc = installTuituiRpc(ctx, controller, config.rpcAuthority);
+  const disposeRpc = installTuituiRpc(ctx, controller, logger);
 
   ctx.effect(() => async () => {
     await supervisor.close();
     await controller.close();
-    harness.stopManagedProcess();
   }, 'dsh-tuitui: 停止推推机器人连接');
 
   return disposeRpc;

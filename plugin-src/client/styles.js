@@ -56,6 +56,9 @@ const CSS = String.raw`
 .dtui-check { display: flex; align-items: center; gap: 8px; margin: 6px 0; font-size: 13px; color: var(--dsw-alias-label-primary, #1f2329); cursor: pointer; }
 .dtui-check input[type='checkbox'] { width: 16px; height: 16px; accent-color: var(--dtui-blue); cursor: pointer; }
 .dtui-formRow .dtui-hint { display: block; margin-top: 4px; }
+.dtui-role { display: inline-flex; align-items: center; min-height: 20px; padding: 0 8px; border-radius: 999px; font-size: 11.5px; font-weight: 600; vertical-align: 1px; }
+.dtui-roleManager { background: color-mix(in srgb, #f7b500 16%, transparent); color: #9a6b00; }
+.dtui-roleMember { background: var(--dsw-alias-bg-module-platform, #f2f3f5); color: var(--dsw-alias-label-secondary, #646a73); }
 `;
 
 export function installTuituiStyles() {
