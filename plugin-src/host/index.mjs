@@ -5,6 +5,7 @@ import { join, resolve } from 'node:path';
 import { TuituiBotController } from './controller.mjs';
 import { HarnessClient } from './harness-client.mjs';
 import { DEFAULT_MEMBER_PRESET_ID, registerMemberPreset } from './preset.mjs';
+import { DEFAULT_QUESTION_TIMEOUT_MS, TuituiQuestionRelay } from './questions.mjs';
 import { installTuituiRpc } from './rpc.mjs';
 import { TuituiRuntime } from './runtime.mjs';
 import { TuituiConfigStore, TuituiStateStore } from './stores.mjs';
@@ -128,6 +129,21 @@ export async function apply(ctx, config = {}) {
     subscribeSessionEvents: (listener) => ctx.on('session/event', (session, event) => listener(session, event), { global: true }),
   });
 
+  // 推推频道里的人工提问中转：把 ask_user_question / 授权弹窗
+  // 发到推推等回复，避免 DSH 弹窗把推推会话堵死。
+  const questions = new TuituiQuestionRelay({
+    logger,
+    timeoutMs: config.questionTimeoutMs ?? DEFAULT_QUESTION_TIMEOUT_MS,
+  });
+  ctx.on('user-questions/request', (request, next) => questions.handleQuestion(request, next), {
+    global: true,
+    prepend: true,
+  });
+  ctx.on('approval/request', (request, next) => questions.handleApproval(request, next), {
+    global: true,
+    prepend: true,
+  });
+
   const controller = new TuituiBotController({
     credentials: ctx.credentials,
     configStore,
@@ -151,6 +167,8 @@ export async function apply(ctx, config = {}) {
       adminPreset: config.agentPreset ?? 'standard',
       memberPreset: memberPresetId,
       ensureMemberPreset,
+      questions,
+      ackEmoji: config.ackEmoji ?? '收到',
     }),
     deleteState: async ({ botId }) => {
       const state = stateStores.get(botId);
@@ -175,6 +193,7 @@ export async function apply(ctx, config = {}) {
   const disposeRpc = installTuituiRpc(ctx, controller, logger);
 
   ctx.effect(() => async () => {
+    questions.close();
     await supervisor.close();
     await controller.close();
   }, 'dsh-tuitui: 停止推推机器人连接');

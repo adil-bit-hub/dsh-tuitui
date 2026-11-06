@@ -1,6 +1,6 @@
 {
   "name": "dsh-tuitui",
-  "version": "0.2.2",
+  "version": "0.3.0",
   "description": "把 360 推推（Tuitui）IM 机器人接入 DeepSeek Harness：管理员使用完整 agent，成员仅问答且无工具/技能；可在设置页启用、停止与删除。",
   "license": "MIT",
   "type": "module",

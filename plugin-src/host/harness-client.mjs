@@ -186,7 +186,10 @@ export class HarnessClient {
    * 提交一次提问并等待该轮答复。
    * @param {string} sessionId - 目标会话。
    * @param {string} text - 提问内容。
-   * @param {{ timeoutMs?: number, onUpdate?: (update: object) => void }} [options]
+   * @param {{ timeoutMs?: number, onUpdate?: (update: object) => void,
+   *   extendWhile?: () => boolean }} [options] -
+   *   `extendWhile` 返回 true 时，超时判定顺延一个完整窗口（用于提问正在
+   *   推推里等用户回答，避免整轮先超时）。
    * @returns {Promise<string>} assistant 最终文本。
    */
   async ask(sessionId, text, options = {}) {
@@ -226,11 +229,22 @@ export class HarnessClient {
         throw normalizeError(error);
       }
 
-      const deadline = Date.now() + timeoutMs;
+      let deadline = Date.now() + timeoutMs;
       // 事件由订阅推送、同步写入 tracker，这里只等待它完成（200ms 粒度）。
       while (!tracker.finished) {
         if (Date.now() >= deadline) {
-          throw new Error(`Harness 回复超时（${Math.round(timeoutMs / 1_000)} 秒）`);
+          let extended = false;
+          try {
+            extended = typeof options.extendWhile === 'function' && options.extendWhile() === true;
+          } catch {
+            extended = false;
+          }
+          if (extended) {
+            // 提问还在推推里等用户回复：顺延整个窗口，等回答后再计时。
+            deadline = Date.now() + timeoutMs;
+          } else {
+            throw new Error(`Harness 回复超时（${Math.round(timeoutMs / 1_000)} 秒）`);
+          }
         }
         await sleep(200);
       }

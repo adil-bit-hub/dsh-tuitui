@@ -215,3 +215,133 @@ test('机器人自己发的消息被忽略', async () => {
   assert.equal(bot.sent.length, 0);
   assert.equal(harness.created.length, 0);
 });
+
+test('收到消息后给用户消息挂一个「收到」表情', async () => {
+  const { bridge, bot, harness } = makeBridge();
+  const reacted = [];
+  bot.react = async (target, messageId, emoji) => {
+    reacted.push({ target, messageId, emoji });
+  };
+  await bridge.accept(message({ platformMessageId: 'pm-1' }));
+  assert.deepEqual(reacted, [{
+    target: { kind: 'account', account: 'alice' },
+    messageId: 'pm-1',
+    emoji: '收到',
+  }]);
+  assert.equal(bridge.status.messagesAcknowledged, 1);
+  assert.equal(harness.prompts.length, 1);
+});
+
+test('表情失败不影响正常回答', async () => {
+  const { bridge, bot } = makeBridge();
+  bot.react = async () => {
+    throw new Error('不支持的 emoji');
+  };
+  await bridge.accept(message({ platformMessageId: 'pm-1' }));
+  assert.equal(bridge.status.messagesAcknowledged, 0);
+  assert.equal(bot.sent.at(-1).text, '这是回答。');
+});
+
+test('没有推推消息 id 时不尝试挂表情', async () => {
+  const { bridge, bot } = makeBridge();
+  let calls = 0;
+  bot.react = async () => {
+    calls += 1;
+  };
+  await bridge.accept(message());
+  assert.equal(calls, 0);
+});
+
+test('待答问题的回复直接交给提问，不转发给模型、不排队等死', async () => {
+  const responder = {
+    pending: true,
+    bindSession() {},
+    hasPending() {
+      return this.pending;
+    },
+    canAccept() {
+      return true;
+    },
+    respond() {
+      this.pending = false;
+      return true;
+    },
+    isBusy() {
+      return this.pending;
+    },
+    cancel() {
+      this.pending = false;
+      return true;
+    },
+    unbindSession() {},
+    unbindSessions() {},
+    unbindBot() {},
+  };
+  const bot = new FakeBot();
+  const harness = new FakeHarness();
+  const bridge = new TuituiHarnessBridge({
+    bot,
+    harness,
+    state: new FakeState(),
+    logger: { info() {}, warn() {}, error() {}, debug() {} },
+    getSecurity: () => normalizeSecurity(undefined),
+    workspace: process.cwd(),
+    ensureMemberPreset: async () => true,
+    questions: responder,
+  });
+
+  const answered = [];
+  responder.respond = (key, text) => {
+    answered.push({ key, text });
+    responder.pending = false;
+    return true;
+  };
+
+  await bridge.accept(message({ content: '1', platformMessageId: 'pm-9' }));
+  assert.deepEqual(answered, [{ key: 'direct:cid-1', text: '1' }]);
+  assert.equal(harness.prompts.length, 0);
+  assert.equal(bot.sent.length, 0);
+});
+
+test('等待提问时发送 /new 会先取消提问再正常处理指令', async () => {
+  const responder = {
+    pending: true,
+    bindSession() {},
+    hasPending() {
+      return this.pending;
+    },
+    canAccept() {
+      return true;
+    },
+    respond() {
+      return false;
+    },
+    isBusy() {
+      return this.pending;
+    },
+    canceled: null,
+    cancel(key) {
+      this.canceled = key;
+      this.pending = false;
+      return true;
+    },
+    unbindSession() {},
+    unbindSessions() {},
+    unbindBot() {},
+  };
+  const bot = new FakeBot();
+  const bridge = new TuituiHarnessBridge({
+    bot,
+    harness: new FakeHarness(),
+    state: new FakeState(),
+    logger: { info() {}, warn() {}, error() {}, debug() {} },
+    getSecurity: () => normalizeSecurity(undefined),
+    workspace: process.cwd(),
+    ensureMemberPreset: async () => true,
+    questions: responder,
+  });
+
+  await bridge.accept(message({ content: '/new', senderId: 'alice' }));
+  assert.equal(responder.canceled, 'direct:cid-1');
+  assert.match(bot.sent.at(-1).text, /已开启新会话/);
+});

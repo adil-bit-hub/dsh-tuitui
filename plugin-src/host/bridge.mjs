@@ -16,6 +16,7 @@ export function createTuituiBridgeStatus() {
     messagesReceived: 0,
     messagesReplied: 0,
     messagesRejected: 0,
+    messagesAcknowledged: 0,
     lastMessageAt: null,
     lastReplyAt: null,
     lastRejectedAt: null,
@@ -28,6 +29,8 @@ export function createTuituiBridgeStatus() {
 
 const SHELL_COMMAND_PATTERN = /^\s*\/(?:shell|exec|run)\s+([\s\S]+)$/i;
 const SHELL_COMMAND_BARE = /^\s*\/(?:shell|exec|run)\s*$/i;
+/** 等待提问回答期间仍可安全执行的会话指令：会先取消提问，再正常处理。 */
+const SAFE_COMMAND_PATTERN = /^\s*\/(?:new|status|help|whoami)\b/i;
 
 /**
  * 把推推入站消息转发给 Harness agent，并把回答发回推推。
@@ -51,6 +54,9 @@ export class TuituiHarnessBridge {
   #adminPreset;
   #memberPreset;
   #ensureMemberPreset;
+  #questions;
+  #ackEmoji;
+  #botId;
   #queues = new Map();
 
   constructor({
@@ -66,6 +72,9 @@ export class TuituiHarnessBridge {
     adminPreset,
     memberPreset,
     ensureMemberPreset = async () => true,
+    questions = null,
+    ackEmoji = '收到',
+    botId = '',
   }) {
     if (!bot || typeof bot.sendText !== 'function') throw new TypeError('A bot client is required');
     if (!harness || !state) throw new TypeError('Harness client and state store are required');
@@ -81,6 +90,9 @@ export class TuituiHarnessBridge {
     this.#adminPreset = adminPreset ?? harness.agentPreset ?? 'standard';
     this.#memberPreset = memberPreset ?? harness.memberAgentPreset ?? 'tuitui-member';
     this.#ensureMemberPreset = ensureMemberPreset;
+    this.#questions = questions;
+    this.#ackEmoji = typeof ackEmoji === 'string' ? ackEmoji.trim() : '';
+    this.#botId = cleanText(botId);
   }
 
   get status() {
@@ -91,10 +103,28 @@ export class TuituiHarnessBridge {
     const conversationId = cleanText(message?.conversationId);
     const kind = message?.kind === 'group' ? 'group' : 'direct';
     const key = `${kind}:${conversationId}`;
+    const full = { ...message, kind, conversationId };
+    const text = cleanText(message?.content);
+
+    // 待答问题的回复必须插队处理：此时同一会话的队列正卡在
+    // harness.ask() 上等这一刻的回答，排到队尾会死锁。
+    if (this.#questions?.hasPending(key) && text && this.#questions.canAccept(key, message?.senderId)) {
+      if (SAFE_COMMAND_PATTERN.test(text)) {
+        this.#questions.cancel(key, '用户在等待回答时发送了会话指令');
+      } else {
+        return this.#answerPending(full, key, text).then((consumed) => (
+          consumed ? undefined : this.#enqueue(full, key)
+        ));
+      }
+    }
+    return this.#enqueue(full, key);
+  }
+
+  #enqueue(message, key) {
     const previous = this.#queues.get(key) ?? Promise.resolve();
     const current = previous
       .catch(() => undefined)
-      .then(() => this.#process({ ...message, kind, conversationId }))
+      .then(() => this.#process(message))
       .finally(() => {
         if (this.#queues.get(key) === current) this.#queues.delete(key);
       });
@@ -135,6 +165,10 @@ export class TuituiHarnessBridge {
     const target = message.replyTarget;
     const text = cleanText(message.content);
     try {
+      // 先回一个 emoji 表示「收到」，让提问的人立刻有反馈；
+      // 失败（平台不支持该表情等）不影响后续处理。
+      await this.#ack(target, message.platformMessageId);
+
       if (!text) {
         await this.#bot.sendText(target, '目前只支持文字消息。');
         await this.#state.markSeen(messageId);
@@ -185,6 +219,7 @@ export class TuituiHarnessBridge {
           '推推机器人已连接 DeepSeek Harness。',
           '',
           '直接发送文字即可继续当前会话。',
+          '机器人需要你确认时，会在这里列出选项：回复序号或文字即可继续（回复 0 跳过）。',
           '/new  开启一个全新会话',
           '/status  检查连接状态',
           '/whoami  查看我的身份信息',
@@ -207,11 +242,13 @@ export class TuituiHarnessBridge {
       // 会话按「会话 + 角色」隔离：管理员与成员各自拥有独立上下文，
       // 避免成员复用管理员的（带工具）会话。旧版本键（无角色）一并清理。
       if (command === '/new') {
-        await this.#state.clearSessions([
+        const roleKeys = [
           `${message.kind}:${message.conversationId}:manager`,
           `${message.kind}:${message.conversationId}:member`,
           `${message.kind}:${message.conversationId}`,
-        ]);
+        ];
+        this.#questions?.unbindSessions(roleKeys.map((roleKey) => this.#state.sessionFor(roleKey)));
+        await this.#state.clearSessions(roleKeys);
         await this.#bot.sendText(target, '已开启新会话。请发送你的问题。');
         await this.#state.markSeen(messageId);
         return;
@@ -252,12 +289,24 @@ export class TuituiHarnessBridge {
           sessionId = await this.#harness.createSession(preset);
           await this.#state.setSession(conversationKey, sessionId);
         }
+        // 登记「Harness 会话 → 推推会话」通道：模型在中途调用
+        // ask_user_question / 审批时，questionRelay 会把问题发回推推等回复。
+        this.#questions?.bindSession(sessionId, {
+          conversationKey: `${message.kind}:${message.conversationId}`,
+          senderId,
+          label: senderLabel,
+          botId: this.#botId,
+          send: (replyText) => this.#bot.sendText(target, replyText),
+        });
         try {
           answer = await this.#harness.ask(sessionId, prompt, {
             timeoutMs: this.#replyTimeoutMs,
+            // 提问还没答完时不要判定整轮超时：等待时长由 questionRelay 控制。
+            extendWhile: () => this.#questions?.isBusy(sessionId) === true,
           });
         } catch (error) {
           if (error?.code !== 'session-not-found' || attempt > 0) throw error;
+          this.#questions?.unbindSession(sessionId);
           await this.#state.clearSession(conversationKey);
         }
       }
@@ -294,5 +343,56 @@ export class TuituiHarnessBridge {
     this.#status.messagesRejected += 1;
     this.#status.lastRejectedAt = new Date().toISOString();
     await this.#bot.sendText(target, `${reason}。\n当前身份：${senderLabel}。如需权限，请联系管理员在 Harness 设置页将你加入管理员列表。`);
+  }
+
+  /**
+   * 给用户消息回一个 emoji（「收到」），失败只记调试日志。
+   * @param {object} target - 推推 ToTarget。
+   * @param {string} platformMessageId - 推推消息 id；没有它就无法挂表情。
+   */
+  async #ack(target, platformMessageId) {
+    const emoji = this.#ackEmoji;
+    const messageId = cleanText(platformMessageId);
+    if (!emoji || !messageId || typeof this.#bot.react !== 'function') return;
+    try {
+      await this.#bot.react(target, messageId, emoji);
+      this.#status.messagesAcknowledged += 1;
+    } catch (error) {
+      this.#logger.debug?.('[dsh-tuitui] failed to add the receipt emoji:', error?.message ?? error);
+    }
+  }
+
+  /**
+   * 把一条推推消息当作待答问题的回答处理（不进入会话队列、不转发给模型）。
+   * @param {object} message - 已归一化的入站消息（含 kind/conversationId）。
+   * @param {string} key - `${kind}:${conversationId}`
+   * @param {string} text
+   * @returns {Promise<boolean>} 是否被当作回答消费掉了
+   */
+  async #answerPending(message, key, text) {
+    const messageId = cleanText(message.messageId);
+    const senderId = cleanText(message.senderId);
+    if (!messageId || !senderId || message.senderIsBot === true) return true;
+    if (this.#state.hasSeen(messageId)) return true;
+
+    const target = message.replyTarget;
+    try {
+      await this.#ack(target, message.platformMessageId);
+      if (!this.#questions?.respond(key, text, { senderId })) {
+        // 等待中的问题刚刚被取消/超时：这条消息按普通消息继续处理。
+        this.#logger.warn?.('[dsh-tuitui] pending question disappeared before the reply arrived');
+        return false;
+      }
+      await this.#state.markSeen(messageId);
+      this.#status.messagesReceived += 1;
+      this.#status.lastMessageAt = new Date().toISOString();
+      this.#status.lastSenderName = cleanText(message.senderName) || senderId;
+      this.#status.lastSenderAccount = senderId;
+      return true;
+    } catch (error) {
+      this.#status.lastError = error?.message ?? String(error);
+      this.#logger.error?.('[dsh-tuitui] failed to relay a question reply:', error);
+      return true;
+    }
   }
 }

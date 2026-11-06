@@ -4,6 +4,8 @@
 
 - 私聊消息直接回复；群聊仅在 @机器人 时回复。
 - 回答由 Harness agent 生成（模型跟随 Harness 配置）。
+- **收到即回执**：每条来自推推的消息到达后，机器人先在原消息上挂一个 emoji（默认「收到」），再开始处理，避免用户不知道消息是否送达。
+- **提问/授权不弹 DSH 弹窗**：模型在推推会话里调用 `ask_user_question`（或触发需要授权的审批）时，问题会连同选项一起发到推推，等用户在推推里回复序号或文字后继续；不再依赖 DSH 网页里的问题卡片，因此不会因为没人点弹窗而把推推会话堵死。
 - **管理员 / 成员双角色**：管理员（manager）使用完整 agent，可用工具、技能与 `/shell` 等操作；非管理员一律是成员（member），使用「无工具、无技能」的受限预设，只能问答，不能执行任何操作。
 - 每个推推会话映射到一个独立的 Harness 会话；在推推里发送 `/new` 开启新会话，`/status` 检查连接，`/whoami` 查看自己的身份，`/help` 查看帮助。
 - 自动识别每条消息的发送人：转发给 Harness 的提问以 `账号(角色)：内容` 呈现（如 `fengzhao(manager)：今天天气怎么样`、`alice(member)：帮我查个资料`）。
@@ -89,6 +91,8 @@ dsh plugin --profile web add .
     shellTimeoutMs: 120000         # /shell 执行超时（毫秒）
     memberPresetWaitMs: 15000      # 等待受限预设注册完成的超时
     staleConnectionRefreshMs: 1800000  # 连接建立后长期无事件则重建（默认 30 分钟）
+    ackEmoji: '收到'                # 收到消息后挂的表情名；置空字符串可关闭
+    questionTimeoutMs: 900000      # 提问在推推里等待回答的超时（默认 15 分钟，超时按跳过处理）
 ```
 
 `memberAgentPreset` 建议保持默认：改名时插件会注册同名受限预设，但请勿把它指向带工具的预设。
@@ -113,11 +117,12 @@ dsh plugin --profile web add .
 
 ```
 plugin-src/host/
-  index.mjs          # 插件入口：注册受限预设、装配控制器与 RPC 路由
+  index.mjs          # 插件入口：注册受限预设、装配控制器与 RPC 路由、提问中转
   rpc.mjs            # /tuitui HTTP 路由 + 准入检查 + 端点校验
   controller.mjs     # 机器人生命周期（接入/启用/停止/删除）
   runtime.mjs        # 单个机器人：推推 WebSocket 订阅
   bridge.mjs         # 消息 → 角色分流 → Harness 会话 → 回复
+  questions.mjs      # ask_user_question / 审批弹窗 → 推推提问与作答
   harness-client.mjs # 进程内 sessionController 驱动 + session/event 跟踪
   preset.mjs         # 动态注册 tuitui-member 受限预设
   member-guard.mjs   # 受限预设内的零工具守卫

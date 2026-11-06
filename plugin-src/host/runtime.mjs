@@ -47,6 +47,8 @@ export class TuituiRuntime {
   #adminPreset;
   #memberPreset;
   #ensureMemberPreset;
+  #questions;
+  #ackEmoji;
   #status = createTuituiRuntimeStatus();
   #client = null;
   #bridge = null;
@@ -67,6 +69,8 @@ export class TuituiRuntime {
     adminPreset,
     memberPreset,
     ensureMemberPreset,
+    questions = null,
+    ackEmoji = '收到',
     createClient = (appId, appSecret) => new TuituiBotClient(appId, appSecret),
   }) {
     if (!config || !appSecret || !harness || !state) {
@@ -85,6 +89,8 @@ export class TuituiRuntime {
     this.#adminPreset = adminPreset;
     this.#memberPreset = memberPreset;
     this.#ensureMemberPreset = ensureMemberPreset;
+    this.#questions = questions;
+    this.#ackEmoji = ackEmoji;
     this.#createClient = createClient;
   }
 
@@ -117,6 +123,10 @@ export class TuituiRuntime {
     this.#bridge = new TuituiHarnessBridge({
       bot: {
         sendText: (target, text) => client.im.sendText({ to: target, text }).then(() => undefined),
+        // 收到用户消息后挂一个「收到」表情；SDK 用 emoji_reaction 修改消息。
+        react: (target, messageId, emoji) => client.im
+          .emojiReaction({ to: target, messageId, emoji })
+          .then(() => undefined),
       },
       harness: this.#harness,
       state: this.#state,
@@ -129,6 +139,9 @@ export class TuituiRuntime {
       adminPreset: this.#adminPreset,
       memberPreset: this.#memberPreset,
       ensureMemberPreset: this.#ensureMemberPreset,
+      questions: this.#questions,
+      ackEmoji: this.#ackEmoji,
+      botId: this.#config.botId,
     });
 
     let readyResolve;
@@ -209,6 +222,7 @@ export class TuituiRuntime {
       ?? body.data?.user_name ?? body.data?.nick_name);
     this.#bridge?.accept({
       messageId,
+      platformMessageId: typeof body?.data?.msgid === 'string' ? body.data.msgid : '',
       conversationId: body.cid,
       kind: isGroup ? 'group' : 'direct',
       senderId: body.user_account || body.uid,
@@ -229,6 +243,9 @@ export class TuituiRuntime {
     this.#subscription = null;
     this.#client = null;
     this.#bridge = null;
+    // 先放弃正在等推推回复的提问并解绑，否则 waitForIdle 会一直卡到问题超时。
+    this.#questions?.cancelBot(this.#config.botId);
+    this.#questions?.unbindBot(this.#config.botId);
     try {
       subscription?.unsubscribe();
     } catch (error) {
